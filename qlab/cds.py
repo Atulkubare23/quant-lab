@@ -1,8 +1,9 @@
 """CDS engine following the ISDA CDS Standard Model conventions (the "JPMCDS" model behind the
 Markit upfront converter).
 
-  Dates     standard coupon dates 20 Mar/Jun/Sep/Dec, adjusted to the next weekday (no holiday
-            calendar here); step-in T+1; cash settlement T+3 weekdays; accrual from the last coupon
+  Dates     standard coupon dates 20 Mar/Jun/Sep/Dec, adjusted to the following business day of
+            the contract's calendar (qlab.calendars; WEEKENDS by default, or TARGET / USNY / LONDON /
+            TOKYO / joints); step-in T+1 calendar day; cash settlement T+3 business days; accrual from the last coupon
             date on or before step-in; the last period runs to maturity inclusive (one extra day);
             ACT/360 accrual, ACT/365F for curve times measured from the trade date
   Curves    discount and hazard curves both piecewise-flat forward (linear in rate x time)
@@ -21,20 +22,18 @@ from math import exp, log
 import numpy as np
 from scipy.optimize import brentq
 
+from .calendars import WEEKENDS, Calendar
+
 
 # ---------------------------------------------------------------- dates
-def _weekday(d: date) -> date:
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return d
+def _weekday(d: date, cal: Calendar = WEEKENDS) -> date:
+    """Following business day."""
+    return cal.adjust(d, "following")
 
 
-def add_weekdays(d: date, n: int) -> date:
-    while n > 0:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            n -= 1
-    return d
+def add_weekdays(d: date, n: int, cal: Calendar = WEEKENDS) -> date:
+    """n business days after d (weekdays only with the default calendar)."""
+    return cal.add_business_days(d, n)
 
 
 def imm_dates(start_year: int, end_year: int):
@@ -53,21 +52,21 @@ def standard_maturity(trade: date, tenor_years: int) -> date:
     return date(base.year + tenor_years, base.month, 20)
 
 
-def accrual_start(stepin: date) -> date:
+def accrual_start(stepin: date, cal: Calendar = WEEKENDS) -> date:
     """Last adjusted coupon date on or before step-in."""
-    c = [_weekday(d) for d in imm_dates(stepin.year - 1, stepin.year)]
+    c = [_weekday(d, cal) for d in imm_dates(stepin.year - 1, stepin.year)]
     return max(d for d in c if d <= stepin)
 
 
-def schedule(stepin: date, maturity: date):
+def schedule(stepin: date, maturity: date, cal: Calendar = WEEKENDS):
     """Accrual periods (start, end, pay) with the ISDA conventions."""
-    start = accrual_start(stepin)
-    unadj = [d for d in imm_dates(start.year, maturity.year) if start < _weekday(d) and d <= maturity]
+    start = accrual_start(stepin, cal)
+    unadj = [d for d in imm_dates(start.year, maturity.year) if start < _weekday(d, cal) and d <= maturity]
     out, s = [], start
     for i, d in enumerate(unadj):
         last = i == len(unadj) - 1
-        end = maturity + timedelta(days=1) if last else _weekday(d)
-        pay = _weekday(d)
+        end = maturity + timedelta(days=1) if last else _weekday(d, cal)
+        pay = _weekday(d, cal)
         out.append((s, end, pay))
         s = end
     return out
@@ -129,10 +128,10 @@ def protection_leg(trade, stepin, maturity, disc, haz, R):
     return (1 - R) * out
 
 
-def premium_leg(trade, stepin, maturity, disc, haz, coupon=1.0, accrued_on_default=True):
+def premium_leg(trade, stepin, maturity, disc, haz, coupon=1.0, accrued_on_default=True, cal=WEEKENDS):
     """Risky value of paying `coupon` per year (ACT/360), including the full first period."""
     total = 0.0
-    for s, e, pay in schedule(stepin, maturity):
+    for s, e, pay in schedule(stepin, maturity, cal):
         acc = (e - s).days / 360.0
         te, tp = _yf(trade, e) - 1 / 365.0, _yf(trade, pay)
         total += coupon * acc * disc.df(tp) * haz.df(te)
@@ -162,6 +161,7 @@ class CDS:
     coupon: float = 0.01          # standard running coupon (100bp or 500bp)
     recovery: float = 0.4
     notional: float = 1e7
+    calendar: Calendar = WEEKENDS
 
     @property
     def stepin(self):
@@ -169,15 +169,15 @@ class CDS:
 
     @property
     def settle(self):
-        return add_weekdays(self.trade, 3)
+        return add_weekdays(self.trade, 3, self.calendar)
 
     def accrued(self):
-        return self.coupon * (self.stepin - accrual_start(self.stepin)).days / 360.0
+        return self.coupon * (self.stepin - accrual_start(self.stepin, self.calendar)).days / 360.0
 
     def rpv01(self, disc, haz, clean=True):
         """Risky annuity per unit coupon, as of the cash settlement date."""
-        dirty = premium_leg(self.trade, self.stepin, self.maturity, disc, haz) / disc.df(_yf(self.trade, self.settle))
-        return dirty - (self.stepin - accrual_start(self.stepin)).days / 360.0 if clean else dirty
+        dirty = premium_leg(self.trade, self.stepin, self.maturity, disc, haz, cal=self.calendar) / disc.df(_yf(self.trade, self.settle))
+        return dirty - (self.stepin - accrual_start(self.stepin, self.calendar)).days / 360.0 if clean else dirty
 
     def protection(self, disc, haz):
         return protection_leg(self.trade, self.stepin, self.maturity, disc, haz, self.recovery) / disc.df(_yf(self.trade, self.settle))
@@ -209,18 +209,18 @@ class CDS:
         base = self.upfront_from_spread(spread, disc)
         cs01 = self.notional * (self.upfront_from_spread(spread + 1e-4, disc) - base)
         h = self.hazard_from_spread(spread, disc)
-        rec = CDS(self.trade, self.maturity, self.coupon, self.recovery + 0.01, self.notional)
+        rec = CDS(self.trade, self.maturity, self.coupon, self.recovery + 0.01, self.notional, self.calendar)
         rr01 = self.notional * (rec.upfront(disc, flat(h)) - self.upfront(disc, flat(h)))
         jtd = self.notional * ((1 - self.recovery) - base)
         return {"upfront": base, "price": 100 * (1 - base), "cs01": cs01, "rec01": rr01, "jtd": jtd}
 
 
-def bootstrap(trade, tenors, spreads, disc, recovery=0.4):
+def bootstrap(trade, tenors, spreads, disc, recovery=0.4, calendar=WEEKENDS):
     """Piecewise-flat hazard curve repricing par CDS at standard maturities."""
     times, rates = [], []
     for n, s in zip(tenors, spreads):
         mat = standard_maturity(trade, n)
-        c = CDS(trade, mat, s, recovery)
+        c = CDS(trade, mat, s, recovery, calendar=calendar)
         t = _yf(trade, mat + timedelta(days=1))
         def f(h):
             rt_prev = times[-1] * rates[-1] if times else 0.0
@@ -248,5 +248,9 @@ if __name__ == "__main__":
         print(f"coupon {coupon * 1e4:3.0f}bp quoted {spread * 1e4:4.0f}bp -> upfront {100 * r['upfront']:6.3f}%  "
               f"price {r['price']:7.3f}  cash {c.notional * (r['upfront'] - c.accrued()):>11,.0f}  CS01 {r['cs01']:>8,.0f}  "
               f"back to spread {1e4 * c.spread_from_upfront(r['upfront'], disc):.4f}bp")
+    # the same trade on 24 Dec 2026 in London: Christmas and Boxing Day push settlement out
+    from .calendars import LONDON
+    xmas = date(2026, 12, 24)
+    print(f"24 Dec 2026 settle: weekends {add_weekdays(xmas, 3)}, London {add_weekdays(xmas, 3, LONDON)}")
     hz = bootstrap(trade, [1, 3, 5, 7, 10], [0.0040, 0.0060, 0.0085, 0.0100, 0.0115], disc)
     print("bootstrapped forward hazards:", np.round(np.diff(np.concatenate([[0], hz.times * hz.rates])) / np.diff(np.concatenate([[0], hz.times])), 5))

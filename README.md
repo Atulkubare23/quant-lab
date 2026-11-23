@@ -5,7 +5,7 @@ Dependencies are numpy and scipy only, every formula is written out, and every m
 against a closed form, a second method or a published table.
 
 ```
-python -m pytest -q          # 87 tests, ~3-7 min (deep hedging trains twice)
+python -m pytest -q          # 94 tests, ~3-7 min (deep hedging trains twice)
 python -m qlab.<module>      # each module prints a short demo
 ```
 
@@ -22,6 +22,7 @@ python -m qlab.<module>      # each module prints a short demo
 | `deephedge` | Deep hedging (Buehler et al. 2019): an MLP trained with Adam on the `aad` tape (no PyTorch) to minimise the entropic risk of hedged P&L, with transaction costs, under Black-Scholes or Heston | Buehler's `deephedging` repo | No costs: learns the Black-Scholes delta and price. With 0.5% costs it beats delta hedging (indifference price 3.33 vs 3.84) |
 | `fmm` | SOFR forward market model (Lyashenko-Mercurio): backward-looking compounded rates, shifted lognormal, vol decaying through the accrual period, spot measure. Caplets, swaptions, Bermudans by LSM | Lyashenko & Mercurio (2019); QuantLib LMM | Numeraire reprices the curve; caplets match the σ²(T₀ + τ/3) closed form; swaptions match Rebonato; the Bermudan has the right limits |
 | `cds` | ISDA Standard Model conventions: IMM coupon dates and the semi-annual roll, step-in and T+3 settlement, ACT/360. Exact protection and accrual-on-default legs on flat-forward curves. Conventional spread ↔ upfront, bootstrap, CS01 | ISDA/Markit JPMCDS model | Quote round-trips to 1e-12; legs match daily integration to 1e-6; bootstrap reprices par quotes |
+| `calendars` | Rule-based business-day calendars with no data files: TARGET, New York (Fed schedule), London (moved and one-off bank holidays since 1995), Tokyo (substitute and citizens' holidays, equinox formula, the 2019 and 2020–21 special years), and joint calendars. Following, preceding, modified following; business-day arithmetic. The CDS engine takes one per contract | QuantLib calendars | Published holiday lists: London 2022 in full, Tokyo 2015, 2019, 2020 and 2026, New York observance rules, Easter dates |
 | `saccr` | Basel SA-CCR: supervisory duration, delta and maturity factor; IR, FX, credit, equity and commodity add-ons; multiplier; margined and unmargined RC; EAD | BCBS 279 (2014) | **All five worked examples in Annex 4a: EAD 569, 381, 5,406, 936, 1,879** |
 | `frtb`, `sbm` | The full FRTB standardised approach. Sensitivities-based method (MAR21) for all seven risk classes (GIRR, CSR non-securitisation, CSR securitisation CTP and non-CTP, equity, commodity, FX): delta, vega and curvature under three correlation scenarios. Default risk charge (MAR22): LGD, maturity scaling, seniority-aware netting, hedge benefit ratio, and the securitisation and CTP rules. Residual risk add-on (MAR23). Total = SBM + DRC + RRAO | Basel Framework MAR21–23 (2023) | GIRR correlations reproduce MAR21 Table 2; the MAR22 FAQ stock-vs-index-future offset nets to zero; hand calculations for HBR, CTP half-weighting of negative buckets and the RRAO exclusions; long options carry no curvature charge |
 | `simm` | ISDA SIMM engine for all six risk classes. IR delta (sub-curves, inflation, xccy, concentration), vega and curvature (λ/θ). Credit qualifying (issuer/tenor factors, base correlation) and non-qualifying, equity, commodity: one bucketed engine with concentration factors and a separate residual bucket. FX. ψ across risk classes within each product class (RatesFX, Credit, Equity, Commodity), with per-trade overrides. Product-class multipliers and add-ons (fixed, and factor × notional by product type), as in the CRIF `Param_*` records | ISDA SIMM methodology | Algebra checked by hand calculations. **The shipped calibration is a placeholder** (see below) |
@@ -68,4 +69,3 @@ Every result carries the parameter file's `status` string, so placeholder output
 ## Not built yet
 
 - FRTB: securitisation DRC risk weights must be supplied per tranche (the banking-book securitisation framework is not built). The internal models approach (IMA) is not built.
-- An exchange holiday calendar for the CDS dates; the engine currently skips weekends only.
