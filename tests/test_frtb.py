@@ -57,3 +57,125 @@ def test_capital_takes_the_worst_scenario():
     r = F.capital(s)
     assert r["capital"] == max(v["total"] for v in r["scenarios"].values())
     assert r["binding"] == "low"                                                          # offsetting positions
+
+
+# ---------------------------------------------------------------- CSR and commodity (MAR21.51-21.85)
+def test_csr_sector_gamma_reproduces_table_5_and_rating_split():
+    assert F.csr_gamma(1, 2) == pytest.approx(0.75)
+    assert F.csr_gamma(4, 13) == pytest.approx(0.5 * 0.20)           # different rating and sector
+    assert F.csr_gamma(3, 11) == pytest.approx(0.5)                   # same sector, IG vs HY
+    assert F.csr_gamma(5, 17) == pytest.approx(0.45) and F.csr_gamma(16, 3) == 0.0
+    assert F.csr_gamma(17, 18) == pytest.approx(0.75) and F.csr_gamma(7, 8) == pytest.approx(0.05)
+    for b in range(1, 19):
+        for c in range(1, 19):
+            assert F.csr_gamma(b, c) == F.csr_gamma(c, b)
+
+
+def test_csr_intra_bucket_name_tenor_basis():
+    a = F.Sens("CSR", "delta", 4, 1e6, curve="bond", tenor=5, name="ACME")
+    b = F.Sens("CSR", "delta", 4, -1e6, curve="CDS", tenor=10, name="WIDGETCO")
+    w = 0.03e6
+    rho = 0.35 * 0.65 * 0.999
+    assert F.delta_vega([a, b], "CSR", "delta") == pytest.approx(sqrt(2 * w * w - 2 * rho * w * w))
+    c = F.Sens("CTP", "delta", 4, 1e6, curve="bond", tenor=5, name="ACME")
+    d = F.Sens("CTP", "delta", 4, 1e6, curve="CDS", tenor=5, name="ACME")
+    w = 0.05e6
+    assert F.delta_vega([c, d], "CTP", "delta") == pytest.approx(sqrt(2 * w * w + 2 * 0.99 * w * w))
+    other = [F.Sens("CSR", "delta", 16, 1e6, tenor=1, name="X"), F.Sens("CSR", "delta", 16, -1e6, tenor=1, name="Y")]
+    assert F.delta_vega(other, "CSR", "delta") == pytest.approx(2 * 0.12e6)
+
+
+def test_securitisation_non_ctp_weights_and_bucket_25():
+    assert F.NCTP_RW[9] == pytest.approx(1.25 * 0.009) and F.NCTP_RW[17] == pytest.approx(1.75 * 0.009)
+    s = [F.Sens("NCTP", "delta", 1, 1e6, tenor=5, name="T1"), F.Sens("NCTP", "delta", 4, 1e6, tenor=5, name="T2"),
+         F.Sens("NCTP", "delta", 25, 1e6, tenor=5, name="T3")]
+    k1, k4, k25 = 0.009e6, 0.02e6, 0.035e6
+    assert F.delta_vega(s, "NCTP", "delta") == pytest.approx(sqrt(k1 * k1 + k4 * k4) + k25)   # gamma 0, no offset with 25
+
+
+def test_commodity_correlations_and_buckets():
+    wti = F.Sens("COMM", "delta", 2, 1e6, tenor=1, name="WTI", location="Cushing")
+    brent = F.Sens("COMM", "delta", 2, -1e6, tenor=5, name="Brent", location="Le Havre")
+    w = 0.35e6
+    rho = 0.95 * 0.99 * 0.999
+    assert F.delta_vega([wti, brent], "COMM", "delta") == pytest.approx(sqrt(2 * w * w - 2 * rho * w * w))
+    gold = F.Sens("COMM", "delta", 7, 1e6, tenor=1, name="Gold")
+    other = F.Sens("COMM", "delta", 11, 1e6, tenor=1, name="Potash")
+    g, o = 0.20e6, 0.50e6
+    assert F.delta_vega([wti, gold], "COMM", "delta") == pytest.approx(sqrt(w * w + g * g + 2 * 0.2 * w * g))
+    assert F.delta_vega([gold, other], "COMM", "delta") == pytest.approx(sqrt(g * g + o * o))
+
+
+def test_curvature_and_vega_for_new_classes_use_squared_name_correlation():
+    c = [F.Curvature("COMM", 2, "WTI", 1e5, -1e4), F.Curvature("COMM", 2, "Brent", 2e5, -2e4)]
+    r = 0.95 ** 2
+    assert F.curvature(c, "COMM") == pytest.approx(sqrt(1e10 + 4e10 + 2 * r * 2e10))
+    v = [F.Sens("CSR", "vega", 4, 1e6, tenor=1, name="A"), F.Sens("CSR", "vega", 4, 1e6, tenor=3, name="B")]
+    rho = F.vega_maturity_corr(1, 3) * 0.35
+    assert F.delta_vega(v, "CSR", "vega") == pytest.approx(sqrt(2e12 + 2 * rho * 1e12))
+    assert F.curvature_rw("GIRR", "USD") == 0.017 and F.curvature_rw("COMM", 3) == 0.60
+
+
+# ---------------------------------------------------------------- DRC (MAR22) and RRAO (MAR23)
+def test_jtd_lgd_pnl_and_maturity_scaling():
+    assert F.JTD("X", 10e6, -1e6, seniority="senior").gross() == pytest.approx(6.5e6)
+    assert F.JTD("X", 10e6, 0, seniority="covered").gross() == pytest.approx(2.5e6)
+    assert F.JTD("X", -10e6, 0.5e6, seniority="non-senior").gross() == pytest.approx(-9.5e6)
+    assert F.JTD("X", 10e6, -11e6, seniority="equity").gross() == 0.0             # floored at zero
+    assert F.JTD("X", 10e6, 0, seniority="equity", maturity=0.5).gross() == pytest.approx(5e6)
+    assert F.JTD("X", 10e6, 0, seniority="equity", maturity=0.01).gross() == pytest.approx(2.5e6)  # 3m floor
+
+
+def test_index_future_against_stock_offsets_fully():
+    # MAR22 FAQ: a short 1-month future against a long stock both count at the 3-month floor
+    pos = [F.JTD("ACME", 10, seniority="equity", maturity=0.25), F.JTD("ACME", -10, seniority="equity", maturity=1 / 12)]
+    assert F.drc_nonsec(pos)["total"] == pytest.approx(0.0)
+
+
+def test_seniority_rule_for_offsetting():
+    # a senior short may not offset a non-senior long; a non-senior short may offset a senior long
+    nets = F.net_jtd([F.JTD("X", 10, seniority="non-senior"), F.JTD("X", -10, seniority="senior")])
+    assert nets[("corporates", "X", "BBB")] == pytest.approx((10, -7.5))
+    nets = F.net_jtd([F.JTD("X", 10, seniority="senior"), F.JTD("X", -10, seniority="non-senior")])
+    assert nets[("corporates", "X", "BBB")] == pytest.approx((0, -2.5))
+
+
+def test_drc_bucket_hbr_by_hand():
+    pos = [F.JTD("A", 100, rating="BBB", seniority="equity"), F.JTD("B", -50, rating="AA", seniority="equity"),
+           F.JTD("S", 40, rating="A", seniority="equity", bucket="sovereigns")]
+    r = F.drc_nonsec(pos)
+    h = 100 / 150
+    assert r["hbr"]["corporates"] == pytest.approx(h)
+    assert r["buckets"]["corporates"] == pytest.approx(0.06 * 100 - h * 0.02 * 50)
+    assert r["buckets"]["sovereigns"] == pytest.approx(0.03 * 40)
+    assert r["total"] == pytest.approx(r["buckets"]["corporates"] + 1.2)
+    # a fully short bucket carries no charge
+    assert F.drc_nonsec([F.JTD("B", -50, seniority="equity")])["total"] == 0.0
+
+
+def test_securitisation_offsets_only_within_tranche():
+    same = [F.Tranche("pool1 A", 100, 0.10, "RMBS EU"), F.Tranche("pool1 A", -100, 0.10, "RMBS EU")]
+    assert F.drc_sec_nonctp(same)["total"] == 0.0
+    diff = [F.Tranche("pool1 A", 100, 0.10, "RMBS EU"), F.Tranche("pool1 B", -100, 0.10, "RMBS EU")]
+    assert F.drc_sec_nonctp(diff)["total"] == pytest.approx(10 - 0.5 * 10)
+
+
+def test_ctp_negative_bucket_counts_half():
+    # index 1 net long 100, index 2 net short 100, same RW: HBR 0.5 across the CTP
+    t = [F.Tranche("CDX IG 0-3", 100, 0.5, "CDX IG"), F.Tranche("iTraxx 0-3", -100, 0.5, "iTraxx")]
+    r = F.drc_ctp(t)
+    assert r["hbr"] == pytest.approx(0.5)
+    assert r["buckets"] == pytest.approx({"CDX IG": 50, "iTraxx": -25})
+    assert r["total"] == pytest.approx(50 - 12.5)
+    assert F.drc_ctp([F.Tranche("x", -100, 0.5, "CDX IG")])["total"] == 0.0
+
+
+def test_rrao_and_total():
+    items = [F.Residual(1e8, exotic=True), F.Residual(1e8, exotic=False),
+             F.Residual(1e8, exotic=False, back_to_back=True), F.Residual(1e8, exotic=False, listed_or_cleared=True),
+             F.Residual(1e8, exotic=True, listed_or_cleared=True)]
+    assert F.rrao(items) == pytest.approx(1e6 + 1e5 + 1e6)
+    s = [F.Sens("FX", "delta", "EUR", 1e6)]
+    r = F.standardised_approach(s, nonsec=[F.JTD("A", 100, seniority="equity")], residual=items[:1])
+    assert r["total"] == pytest.approx(r["SBM"] + 6 + 1e6)
+    assert r["SBM"] == pytest.approx(F.sbm(s)["capital"])
