@@ -54,3 +54,98 @@ def test_totals_combine_risk_classes_with_psi():
     assert r["products"]["RatesFX"] == pytest.approx(sqrt(ir * ir + fx * fx + 2 * P["psi"]["IR"]["FX"] * ir * fx))
     e = M.simm(s + [M.Sens("EQ", "delta", "X", 1e4, bucket="residual")], P)
     assert e["SIMM"] == pytest.approx(r["SIMM"] + P["EQ"]["rw"]["residual"] * 1e4)
+
+
+# ---------------------------------------------------------------- credit and commodity
+def _two(a, b, r):
+    return sqrt(a * a + b * b + 2 * r * a * b)
+
+
+def test_credit_qualifying_same_and_different_issuer():
+    rw = P["CRQ"]["rw"]["4"]
+    same, diff = P["CRQ"]["intra_corr"]["same"], P["CRQ"]["intra_corr"]["diff"]
+    s = [M.Sens("CRQ", "delta", "A/sen", 1_000, bucket="4", label1="5y"),
+         M.Sens("CRQ", "delta", "A/sen", -400, bucket="4", label1="10y"),
+         M.Sens("CRQ", "delta", "B/sen", 700, bucket="4", label1="5y")]
+    w = np.array([rw * 1_000, rw * -400, rw * 700])
+    rho = np.array([[1, same, diff], [same, 1, diff], [diff, diff, 1]])
+    assert M.bucketed_margin(s, P, "CRQ", "delta") == pytest.approx(sqrt(w @ rho @ w))
+
+
+def test_credit_concentration_is_per_issuer_across_tenors():
+    q = copy.deepcopy(P)
+    q["CRQ"]["delta_threshold"]["4"] = 100.0           # issuer A nets 400 -> CR 2; B 100 -> CR 1
+    s = [M.Sens("CRQ", "delta", "A", 600, bucket="4", label1="5y"), M.Sens("CRQ", "delta", "A", -200, bucket="4", label1="10y"),
+         M.Sens("CRQ", "delta", "B", 100, bucket="4", label1="5y")]
+    rw, same, diff = q["CRQ"]["rw"]["4"], q["CRQ"]["intra_corr"]["same"], q["CRQ"]["intra_corr"]["diff"]
+    w = np.array([rw * 600 * 2, rw * -200 * 2, rw * 100])
+    f = 1 / 2                                            # min(CR) / max(CR) between A and B
+    rho = np.array([[1, same, diff * f], [same, 1, diff * f], [diff * f, diff * f, 1]])
+    assert M.bucketed_margin(s, q, "CRQ", "delta") == pytest.approx(sqrt(w @ rho @ w))
+
+
+def test_credit_buckets_gamma_residual_and_base_correlation():
+    a = M.Sens("CRQ", "delta", "A", 1_000, bucket="1", label1="5y")
+    b = M.Sens("CRQ", "delta", "B", -500, bucket="7", label1="5y")
+    ka, kb = P["CRQ"]["rw"]["1"] * 1_000, P["CRQ"]["rw"]["7"] * 500
+    g = P["CRQ"]["inter_corr"][0][6]
+    assert M.bucketed_margin([a, b], P, "CRQ", "delta") == pytest.approx(sqrt(ka * ka + kb * kb - 2 * g * ka * kb))
+    r = M.Sens("CRQ", "delta", "C", 300, bucket="residual", label1="5y")
+    kr = P["CRQ"]["rw"]["residual"] * 300
+    assert M.bucketed_margin([a, b, r], P, "CRQ", "delta") == pytest.approx(sqrt(ka * ka + kb * kb - 2 * g * ka * kb) + kr)
+    bc = [M.Sens("CRQ", "basecorr", "CDX IG", 1e4), M.Sens("CRQ", "basecorr", "iTraxx", 2e4)]
+    kbc = P["CRQ"]["basecorr_rw"] * _two(1e4, 2e4, P["CRQ"]["basecorr_corr"])
+    assert M.bucketed_margin(bc, P, "CRQ", "delta") == pytest.approx(kbc)
+    assert M.bucketed_margin([a] + bc, P, "CRQ", "delta") == pytest.approx(sqrt(ka * ka + kbc * kbc))
+
+
+def test_credit_non_qualifying():
+    c = P["CRNQ"]
+    s = [M.Sens("CRNQ", "delta", "pool1", 100, bucket="1", label1="5y"), M.Sens("CRNQ", "delta", "pool2", 100, bucket="2", label1="5y")]
+    k1, k2 = c["rw"]["1"] * 100, c["rw"]["2"] * 100
+    assert M.bucketed_margin(s, P, "CRNQ", "delta") == pytest.approx(_two(k1, k2, c["inter_corr"][0][1]))
+
+
+def test_commodity_delta_intra_inter_and_other_bucket():
+    c = P["CM"]
+    s = [M.Sens("CM", "delta", "WTI", 1e4, bucket="2"), M.Sens("CM", "delta", "Brent", -6e3, bucket="2")]
+    k = c["rw"]["2"] * _two(1e4, -6e3, c["intra_corr"]["2"])
+    assert M.bucketed_margin(s, P, "CM", "delta") == pytest.approx(k)
+    g = M.Sens("CM", "delta", "Gold", 5e3, bucket="12")
+    kg, sb = c["rw"]["12"] * 5e3, c["rw"]["2"] * 4e3
+    assert M.bucketed_margin(s + [g], P, "CM", "delta") == pytest.approx(sqrt(k * k + kg * kg + 2 * c["inter_corr"][1][11] * sb * kg))
+    # bucket 16 has zero gamma with everything: pure quadrature
+    o = M.Sens("CM", "delta", "Other", 5e3, bucket="16")
+    ko = c["rw"]["16"] * 5e3
+    assert M.bucketed_margin(s + [o], P, "CM", "delta") == pytest.approx(sqrt(k * k + ko * ko))
+
+
+def test_commodity_vega_sums_expiries_and_curvature():
+    c = P["CM"]
+    v = [M.Sens("CM", "vega", "WTI", 1e5, bucket="2", label1="6m"), M.Sens("CM", "vega", "WTI", 5e4, bucket="2", label1="1y")]
+    assert M.bucketed_margin(v, P, "CM", "vega") == pytest.approx(c["vrw"] * c["hvr"] * 1.5e5)
+    cvr = M.scaling(0.5) * 1e5 + M.scaling(1.0) * 5e4                  # one risk factor; theta = 0
+    z = norm.ppf(0.995)
+    assert M.curvature_margin(v, P, "CM") == pytest.approx(z * z * cvr)
+
+
+def test_curvature_residual_kept_separate():
+    a = [M.Sens("CRQ", "vega", "A", 1e6, bucket="3", label1="1y")]
+    r = [M.Sens("CRQ", "vega", "R", -1e6, bucket="residual", label1="1y")]
+    # the short-vol residual cannot offset the long-vol bucket
+    assert M.curvature_margin(a + r, P, "CRQ") == pytest.approx(M.curvature_margin(a, P, "CRQ"))
+    assert M.curvature_margin(r, P, "CRQ") == 0.0
+
+
+def test_product_classes_and_override():
+    s = [M.Sens("CRQ", "delta", "A", 1_000, bucket="4", label1="5y"), M.Sens("CM", "delta", "WTI", 1e4, bucket="2"),
+         M.Sens("EQ", "delta", "X", 1e4, bucket="5")]
+    r = M.simm(s, P)
+    assert set(r["products"]) == {"Credit", "Commodity", "Equity"}
+    assert r["SIMM"] == pytest.approx(sum(r["risk_classes"].values()))       # one class per product: no psi
+    # booking the equity trade in the Credit product class diversifies it with credit via psi
+    s[2].product = "Credit"
+    r2 = M.simm(s, P)
+    crq, eq = r["risk_classes"]["CRQ"], r["risk_classes"]["EQ"]
+    assert r2["products"]["Credit"] == pytest.approx(sqrt(crq * crq + eq * eq + 2 * P["psi"]["CRQ"]["EQ"] * crq * eq))
+    assert P["psi"]["CM"]["IR"] == P["psi"]["IR"]["CM"]

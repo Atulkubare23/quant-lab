@@ -5,7 +5,7 @@ Dependencies are numpy and scipy only, every formula is written out, and every m
 against a closed form, a second method or a published table.
 
 ```
-python -m pytest -q          # 75 tests, ~3-7 min (deep hedging trains twice)
+python -m pytest -q          # 83 tests, ~3-7 min (deep hedging trains twice)
 python -m qlab.<module>      # each module prints a short demo
 ```
 
@@ -24,7 +24,7 @@ python -m qlab.<module>      # each module prints a short demo
 | `cds` | ISDA Standard Model conventions: IMM coupon dates and the semi-annual roll, step-in and T+3 settlement, ACT/360. Exact protection and accrual-on-default legs on flat-forward curves. Conventional spread ↔ upfront, bootstrap, CS01 | ISDA/Markit JPMCDS model | Quote round-trips to 1e-12; legs match daily integration to 1e-6; bootstrap reprices par quotes |
 | `saccr` | Basel SA-CCR: supervisory duration, delta and maturity factor; IR, FX, credit, equity and commodity add-ons; multiplier; margined and unmargined RC; EAD | BCBS 279 (2014) | **All five worked examples in Annex 4a: EAD 569, 381, 5,406, 936, 1,879** |
 | `frtb`, `sbm` | The full FRTB standardised approach. Sensitivities-based method (MAR21) for all seven risk classes (GIRR, CSR non-securitisation, CSR securitisation CTP and non-CTP, equity, commodity, FX): delta, vega and curvature under three correlation scenarios. Default risk charge (MAR22): LGD, maturity scaling, seniority-aware netting, hedge benefit ratio, and the securitisation and CTP rules. Residual risk add-on (MAR23). Total = SBM + DRC + RRAO | Basel Framework MAR21–23 (2023) | GIRR correlations reproduce MAR21 Table 2; the MAR22 FAQ stock-vs-index-future offset nets to zero; hand calculations for HBR, CTP half-weighting of negative buckets and the RRAO exclusions; long options carry no curvature charge |
-| `simm` | ISDA SIMM engine: IR delta (sub-curves, inflation, xccy, concentration), vega, curvature (λ/θ), equity, FX, ψ across risk classes, product classes | ISDA SIMM methodology | Algebra checked by hand calculations. **The shipped calibration is a placeholder** (see below) |
+| `simm` | ISDA SIMM engine for all six risk classes. IR delta (sub-curves, inflation, xccy, concentration), vega and curvature (λ/θ). Credit qualifying (issuer/tenor factors, base correlation) and non-qualifying, equity, commodity: one bucketed engine with concentration factors and a separate residual bucket. FX. ψ across risk classes within each product class (RatesFX, Credit, Equity, Commodity), with per-trade overrides | ISDA SIMM methodology | Algebra checked by hand calculations. **The shipped calibration is a placeholder** (see below) |
 
 ## Results worth knowing
 
@@ -68,5 +68,5 @@ Every result carries the parameter file's `status` string, so placeholder output
 ## Not built yet
 
 - FRTB: securitisation DRC risk weights must be supplied per tranche (the banking-book securitisation framework is not built). The internal models approach (IMA) is not built.
-- SIMM credit and commodity risk classes.
+- SIMM add-ons and the product-class multiplier.
 - An exchange holiday calendar for the CDS dates; the engine currently skips weekends only.
