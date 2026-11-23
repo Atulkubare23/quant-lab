@@ -19,7 +19,10 @@ Risk classes: IR, CreditQ (CRQ), CreditNonQ (CRNQ), Equity (EQ), Commodity (CM),
                 from the 99.5% quantile: lambda = (z^2 - 1)(1 + theta) - theta
   FX delta      per currency, concentration thresholds
   Totals        within a product class (RatesFX, Credit, Equity, Commodity) the six risk-class margins
-                are combined with psi; SIMM = sum of product classes
+                are combined with psi; SIMM = sum_p m_p x SIMM_p + AddOn, with product-class
+                multipliers m_p (default 1) and AddOn = fixed amounts + sum factor x notional by
+                product type (the CRIF Param_ProductClassMultiplier / Param_AddOnFixedAmount /
+                Param_AddOnNotionalFactor / Notional records)
 
 PARAMETERS. The calibration (risk weights, correlations, thresholds) is ISDA's and is published
 in its methodology document, which this session could not download (isda.org refused the request).
@@ -330,7 +333,59 @@ def risk_class_margins(sens, P):
     return {c: rc[c] for c in RISK_CLASSES}
 
 
-def simm(sens, P=None):
+PRODUCT_CLASSES = ("RatesFX", "Credit", "Equity", "Commodity")
+
+
+@dataclass
+class AddOn:
+    """A SIMM margin parameter, following the CRIF Param_* / Notional risk types.
+
+    kind         qualifier       amount
+    multiplier   product class   m: that product class's margin becomes m x SIMM_product
+    fixed        (ignored)       a fixed amount added to the total
+    factor       product type    notional add-on factor as a decimal (0.005 = 0.5%; CRIF quotes it in %)
+    notional     product type    gross notional of trades of that type
+    """
+    kind: str
+    qualifier: str = None
+    amount: float = 0.0
+
+
+def addon_margin(addons):
+    """AddOn = sum of fixed amounts + sum over product types of factor x total notional."""
+    fixed, factors, notionals = 0.0, {}, defaultdict(float)
+    for a in addons:
+        if a.kind == "fixed":
+            fixed += a.amount
+        elif a.kind == "factor":
+            if a.qualifier in factors and factors[a.qualifier] != a.amount:
+                raise ValueError(f"conflicting add-on factors for {a.qualifier!r}")
+            factors[a.qualifier] = a.amount
+        elif a.kind == "notional":
+            notionals[a.qualifier] += abs(a.amount)
+        elif a.kind != "multiplier":
+            raise ValueError(f"unknown add-on kind {a.kind!r}")
+    missing = set(notionals) - set(factors)
+    if missing:
+        raise ValueError(f"notional given without an add-on factor: {sorted(missing)}")
+    by_type = {q: f * notionals.get(q, 0.0) for q, f in factors.items()}
+    return {"fixed": fixed, "notional": by_type, "total": fixed + sum(by_type.values())}
+
+
+def multipliers(addons):
+    m = {}
+    for a in addons:
+        if a.kind == "multiplier":
+            if a.qualifier not in PRODUCT_CLASSES:
+                raise ValueError(f"unknown product class {a.qualifier!r}")
+            if a.qualifier in m and m[a.qualifier] != a.amount:
+                raise ValueError(f"conflicting multipliers for {a.qualifier!r}")
+            m[a.qualifier] = a.amount
+    return m
+
+
+def simm(sens, P=None, addons=()):
+    """SIMM = sum_p m_p x SIMM_p + AddOn. Without add-ons every m_p is 1 and AddOn is 0."""
     P = params() if P is None else P
     psi = P["psi"]
     m = np.array([[1.0 if a == b else psi[a][b] for b in RISK_CLASSES] for a in RISK_CLASSES])
@@ -345,8 +400,12 @@ def simm(sens, P=None):
         detail[prod] = rc
         for c, v in rc.items():
             total_rc[c] += v
+    mult = multipliers(addons)
+    scaled = {p: mult.get(p, 1.0) * v for p, v in products.items()}
+    add = addon_margin(addons)
     return {"status": P["status"], "risk_classes": {c: v for c, v in total_rc.items() if v},
-            "products": products, "by_product": detail, "SIMM": sum(products.values())}
+            "products": products, "multipliers": mult, "products_after_multiplier": scaled,
+            "by_product": detail, "addon": add, "SIMM": sum(scaled.values()) + add["total"]}
 
 
 if __name__ == "__main__":
@@ -373,3 +432,10 @@ if __name__ == "__main__":
     print("risk classes: " + ", ".join(f"{k} {v / 1e6:.2f}m" for k, v in r["risk_classes"].items()))
     print("products:     " + ", ".join(f"{k} {v / 1e6:.2f}m" for k, v in r["products"].items()))
     print(f"SIMM IM:      {r['SIMM'] / 1e6:.2f}m")
+    # illustrative add-ons: a 1.2x Credit multiplier, a fixed amount, a notional add-on for a product
+    # type the sensitivities do not capture well
+    addons = [AddOn("multiplier", "Credit", 1.2), AddOn("fixed", amount=250_000),
+              AddOn("factor", "Bermudan swaption", 0.005), AddOn("notional", "Bermudan swaption", 80e6)]
+    r = simm(book, P, addons)
+    print(f"with add-ons: Credit {r['products_after_multiplier']['Credit'] / 1e6:.2f}m, add-on "
+          f"{r['addon']['total'] / 1e6:.2f}m, SIMM IM {r['SIMM'] / 1e6:.2f}m")

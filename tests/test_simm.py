@@ -149,3 +149,43 @@ def test_product_classes_and_override():
     crq, eq = r["risk_classes"]["CRQ"], r["risk_classes"]["EQ"]
     assert r2["products"]["Credit"] == pytest.approx(sqrt(crq * crq + eq * eq + 2 * P["psi"]["CRQ"]["EQ"] * crq * eq))
     assert P["psi"]["CM"]["IR"] == P["psi"]["IR"]["CM"]
+
+
+# ---------------------------------------------------------------- add-ons and product-class multipliers
+def test_no_addons_changes_nothing():
+    s = [M.Sens("CRQ", "delta", "A", 1_000, bucket="4", label1="5y"), M.Sens("FX", "delta", "EUR", 1e5)]
+    r = M.simm(s, P)
+    assert r["SIMM"] == pytest.approx(sum(r["products"].values()))
+    assert r["addon"]["total"] == 0.0 and r["multipliers"] == {}
+
+
+def test_multiplier_scales_only_its_product_class():
+    s = [M.Sens("CRQ", "delta", "A", 1_000, bucket="4", label1="5y"), M.Sens("FX", "delta", "EUR", 1e5)]
+    base = M.simm(s, P)
+    r = M.simm(s, P, [M.AddOn("multiplier", "Credit", 1.5), M.AddOn("multiplier", "Equity", 2.0)])
+    assert r["products_after_multiplier"]["Credit"] == pytest.approx(1.5 * base["products"]["Credit"])
+    assert r["products_after_multiplier"]["RatesFX"] == pytest.approx(base["products"]["RatesFX"])
+    assert r["SIMM"] == pytest.approx(base["SIMM"] + 0.5 * base["products"]["Credit"])   # no Equity trades: no effect
+
+
+def test_fixed_and_notional_addons():
+    s = [M.Sens("FX", "delta", "EUR", 1e5)]
+    base = M.simm(s, P)["SIMM"]
+    a = [M.AddOn("fixed", amount=1e5), M.AddOn("fixed", amount=5e4),
+         M.AddOn("factor", "Bermudan", 0.005), M.AddOn("notional", "Bermudan", 6e7), M.AddOn("notional", "Bermudan", -4e7),
+         M.AddOn("factor", "Quanto", 0.01)]                                      # factor without notional: zero
+    r = M.simm(s, P, a)
+    assert r["addon"]["notional"] == pytest.approx({"Bermudan": 0.005 * 1e8, "Quanto": 0.0})
+    assert r["addon"]["total"] == pytest.approx(1.5e5 + 5e5)
+    assert r["SIMM"] == pytest.approx(base + 6.5e5)
+
+
+def test_addon_input_errors():
+    with pytest.raises(ValueError):
+        M.addon_margin([M.AddOn("notional", "Bermudan", 1e7)])                  # no factor
+    with pytest.raises(ValueError):
+        M.multipliers([M.AddOn("multiplier", "Rates", 1.2)])                    # not a product class
+    with pytest.raises(ValueError):
+        M.multipliers([M.AddOn("multiplier", "Credit", 1.2), M.AddOn("multiplier", "Credit", 1.3)])
+    with pytest.raises(ValueError):
+        M.addon_margin([M.AddOn("bogus")])
